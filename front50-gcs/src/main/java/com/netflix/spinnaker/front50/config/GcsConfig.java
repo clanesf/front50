@@ -29,6 +29,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.web.client.RestTemplate;
 import rx.schedulers.Schedulers;
 
@@ -59,6 +60,9 @@ public class GcsConfig extends CommonStorageServiceDAOConfig {
   @Autowired
   GcsProperties gcsProperties;
 
+  @Autowired
+  TaskScheduler taskScheduler;
+
   private final Logger log = LoggerFactory.getLogger(getClass());
 
   @Bean
@@ -80,6 +84,7 @@ public class GcsConfig extends CommonStorageServiceDAOConfig {
         retryIntervalBase,
         jitterMultiplier,
         maxRetries,
+        taskScheduler,
         registry);
     } else {
       service = new GcsStorageService(gcsProperties.getBucket(),
@@ -93,6 +98,7 @@ public class GcsConfig extends CommonStorageServiceDAOConfig {
         retryIntervalBase,
         jitterMultiplier,
         maxRetries,
+        taskScheduler,
         registry);
     }
     service.ensureBucketExists();
@@ -101,6 +107,17 @@ public class GcsConfig extends CommonStorageServiceDAOConfig {
       value("project", gcsProperties.getProject()));
     log.info("Bucket versioning is {}.",
       value("versioning", service.supportsVersioning() ? "enabled" : "DISABLED"));
+
+    // Cleanup every 5 minutes to reduce rate limiting contention.
+    long period_ms = 300 * 1000;
+    taskScheduler.scheduleAtFixedRate(
+      new Runnable() {
+        public void run() {
+          service.purgeBatchedVersionPaths();
+        }
+      },
+      period_ms);
+
     return service;
   }
 

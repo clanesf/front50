@@ -16,54 +16,56 @@
 
 package com.netflix.spinnaker.front50.model;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableMap;
-import com.netflix.spinnaker.front50.exception.NotFoundException;
+import static net.logstash.logback.argument.StructuredArguments.value;
 
-import com.google.api.services.storage.Storage;
-import com.google.api.services.storage.StorageScopes;
-import com.google.api.services.storage.model.*;
-
-import com.google.api.services.storage.model.Bucket;
-import com.google.api.client.http.ByteArrayContent;
-import com.google.api.client.util.DateTime;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
-import com.google.api.client.googleapis.services.AbstractGoogleClientRequest;
-
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
+import com.google.api.client.googleapis.services.AbstractGoogleClientRequest;
+import com.google.api.client.http.ByteArrayContent;
 import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.jackson2.JacksonFactory;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.FileInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.concurrent.Callable;
-
+import com.google.api.client.util.DateTime;
+import com.google.api.services.storage.Storage;
+import com.google.api.services.storage.StorageScopes;
+import com.google.api.services.storage.model.Bucket;
+import com.google.api.services.storage.model.Objects;
+import com.google.api.services.storage.model.StorageObject;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
 import com.netflix.spectator.api.Id;
 import com.netflix.spectator.api.Registry;
 import com.netflix.spectator.api.Timer;
+import com.netflix.spinnaker.front50.exception.NotFoundException;
 import com.netflix.spinnaker.front50.retry.GcsSafeRetry;
 import com.netflix.spinnaker.security.AuthenticatedRequest;
 import groovy.lang.Closure;
-import org.apache.commons.lang.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.TaskScheduler;
 
-import static net.logstash.logback.argument.StructuredArguments.value;
 
-
-public class GcsStorageService implements StorageService {
+public class
+GcsStorageService implements StorageService {
   private static final String DEFAULT_DATA_FILENAME = "specification.json";
   private static final String LAST_MODIFIED_FILENAME = "last-modified";
   private final Logger log = LoggerFactory.getLogger(getClass());
@@ -88,6 +90,13 @@ public class GcsStorageService implements StorageService {
   private final Timer listTimer;
   private final Timer insertTimer;
   private final Timer patchTimer;
+  private final TaskScheduler taskScheduler;
+
+  private ConcurrentHashMap<String, AtomicBoolean> updateLockMap = new ConcurrentHashMap<>();
+  private ConcurrentHashMap<String, AtomicBoolean> scheduledUpdateLockMap = new ConcurrentHashMap<>();
+
+  @VisibleForTesting
+  final HashSet<String> purgeOldVersionPaths = new HashSet<String>();
 
   /**
    * Bucket location for when a missing bucket is created. Has no effect if the bucket already
@@ -121,6 +130,7 @@ public class GcsStorageService implements StorageService {
                     String basePath,
                     String projectName,
                     Storage storage,
+                    TaskScheduler taskScheduler,
                     Registry registry) {
     this.bucketName = bucketName;
     this.bucketLocation = bucketLocation;
@@ -134,6 +144,7 @@ public class GcsStorageService implements StorageService {
     this.retryIntervalBase = -1L;
     this.jitterMultiplier = -1L;
     this.maxRetries = -1L;
+    this.taskScheduler = taskScheduler;
 
     Id id = registry.createId("google.storage.invocation");
     deleteTimer = registry.timer(id.withTag("method", "delete"));
@@ -155,6 +166,7 @@ public class GcsStorageService implements StorageService {
                            Long retryIntervalBase,
                            Long jitterMultiplier,
                            Long maxRetries,
+                           TaskScheduler taskScheduler,
                            Registry registry) {
     this(bucketName,
          bucketLocation,
@@ -167,6 +179,7 @@ public class GcsStorageService implements StorageService {
          retryIntervalBase,
          jitterMultiplier,
          maxRetries,
+         taskScheduler,
          registry);
   }
 
@@ -181,6 +194,7 @@ public class GcsStorageService implements StorageService {
                            Long retryIntervalBase,
                            Long jitterMultiplier,
                            Long maxRetries,
+                           TaskScheduler taskScheduler,
                            Registry registry) {
     Storage storage;
 
@@ -210,6 +224,7 @@ public class GcsStorageService implements StorageService {
     this.retryIntervalBase = retryIntervalBase;
     this.jitterMultiplier = jitterMultiplier;
     this.maxRetries = maxRetries;
+    this.taskScheduler = taskScheduler;
     this.registry = registry;
 
     Id id = registry.createId("google.storage.invocation");
@@ -258,15 +273,15 @@ public class GcsStorageService implements StorageService {
             log.error("Could not create bucket={} in project={}: {}",
                       value("bucket", bucketName),
                       value("project", projectName),
-                      e2);
+                      e2.getMessage());
             throw new IllegalStateException(e2);
         }
       } else {
-          log.error("Could not get bucket={}: {}", value("bucket", bucketName), e);
+          log.error("Could not get bucket={}: {}", value("bucket", bucketName), e.getMessage());
           throw new IllegalStateException(e);
       }
     } catch (IOException e) {
-        log.error("Could not get bucket={}: {}", value("bucket", bucketName), e);
+        log.error("Could not get bucket={}: {}", value("bucket", bucketName), e.getMessage());
         throw new IllegalStateException(e);
     }
   }
@@ -349,7 +364,7 @@ public class GcsStorageService implements StorageService {
       writeLastModified(objectType.group);
       log.info("Wrote {} '{}'", value("group", objectType.group), value("key", objectKey));
     } catch (IOException e) {
-      log.error("Update failed on path={}: {}", value("path", path), e);
+      log.error("Update failed on path={}: {}", value("path", path), e.getMessage());
       throw new IllegalStateException(e);
     }
   }
@@ -387,7 +402,7 @@ public class GcsStorageService implements StorageService {
         listObjects.setPageToken(objectsHolder[0].getNextPageToken());
       } while (objectsHolder[0].getNextPageToken() != null);
     } catch (IOException e) {
-      log.error("Could not fetch items from Google Cloud Storage: {}", e);
+      log.error("Could not fetch items from Google Cloud Storage: {}", e.getMessage());
       return new HashMap<String, Long>();
     }
 
@@ -428,7 +443,7 @@ public class GcsStorageService implements StorageService {
         listObjects.setPageToken(objectsHolder[0].getNextPageToken());
       } while (objectsHolder[0].getNextPageToken() != null);
     } catch (IOException e) {
-      log.error("Could not fetch versions from Google Cloud Storage: {}", e);
+      log.error("Could not fetch versions from Google Cloud Storage: {}", e.getMessage());
       return new ArrayList<>();
     }
 
@@ -469,9 +484,9 @@ public class GcsStorageService implements StorageService {
         return objectMapper.readValue(json, clas);
       } catch (Exception ex) {
         if (current_version) {
-          log.error("Error reading {}: {}", value("object", object.getName()), ex);
+          log.error("Error reading {}: ", value("object", object.getName()), ex);
         } else {
-          log.error("Error reading {} generation={}: {}",
+          log.error("Error reading {} generation={}: ",
                     value("object", object.getName()),
                     value("generation", object.getGeneration()),
                     ex);
@@ -480,48 +495,122 @@ public class GcsStorageService implements StorageService {
     }
   }
 
+  // Returns a boolean that a thread is preparing to update lastmodified (but has not yet sent the
+  // request to GCS). If another thread observes this value as true, it can safely skip updating
+  // lastmodified itself as this will be done by the other thread (and said update is guaranteed
+  // to completely happen after the value was observed as true).
+  private AtomicBoolean updateLock(String daoTypeName) {
+    return updateLockMap.computeIfAbsent(daoTypeName, (String s) -> new AtomicBoolean(false));
+  }
+
+  // Returns a boolean that indicates a deferred update to lastmodified has been scheduled due to
+  // receiving an error response from a prior update. If this value is true, a thread can safely
+  // skip updating lastmodified, as this will be handled by the deferred update.
+  private AtomicBoolean scheduledUpdateLock(String daoTypeName) {
+    return scheduledUpdateLockMap.computeIfAbsent(daoTypeName, (String s) -> new AtomicBoolean(false));
+  }
+
+  @VisibleForTesting
+  public void scheduleWriteLastModified(String daoTypeName) {
+    Date when = new Date();
+    when.setSeconds(when.getSeconds() + 2);
+    GcsStorageService service = this;
+    Runnable task = new Runnable() {
+      public void run() {
+        // Release the scheduled update lock, and perform the actual update
+        scheduledUpdateLock(daoTypeName).set(false);
+        log.info("RUNNING {}", daoTypeName);
+        service.writeLastModified(daoTypeName);
+      }
+    };
+    if (scheduledUpdateLock(daoTypeName).compareAndSet(false, true)) {
+      log.info("Scheduling deferred update {} timestamp.", daoTypeName);
+      taskScheduler.schedule(task, when);
+    }
+  }
+
   private void writeLastModified(String daoTypeName) {
-      // We'll just touch the file since the StorageObject manages a timestamp.
-      String timestamp_path = daoRoot(daoTypeName) + '/' + LAST_MODIFIED_FILENAME;
-      StorageObject object = new StorageObject()
-          .setBucket(bucketName)
-          .setName(timestamp_path)
-          .setUpdated(new DateTime(System.currentTimeMillis()));
+    // We'll just touch the file since the StorageObject manages a timestamp.
+    String timestamp_path = daoRoot(daoTypeName) + '/' + LAST_MODIFIED_FILENAME;
+    StorageObject object = new StorageObject()
+      .setBucket(bucketName)
+      .setName(timestamp_path)
+      .setUpdated(new DateTime(System.currentTimeMillis()));
+    // Short-circuit if there's a scheduled update, or if another thread has already acquired the
+    // lock and is updating lastModified.
+    if (!scheduledUpdateLock(daoTypeName).get() && updateLock(daoTypeName).compareAndSet(false, true)) {
       try {
+        synchronized (updateLock(daoTypeName)) {
+          // Release the update lock *before* actually updating lastModified as any thread observing
+          // the lock as set must know that the last modified time will be updated *after* it observed
+          // the lock
+          // That is also the reason this block is synchronized; if a thread acquires the lock while we're
+          // writing lastModified, we want it to hold the lock and block until the current write is done.
+          // (At most one other thread will block in this manner; any further threads will short-circuit
+          // and piggy-back on the blocked thread's update.)
+          updateLock(daoTypeName).set(false);
           timeExecute(patchTimer, obj_api.patch(bucketName, object.getName(), object));
+        }
       } catch (HttpResponseException e) {
-          if (e.getStatusCode() == 404 || e.getStatusCode() == 400) {
-              byte[] bytes = "{}".getBytes();
-              ByteArrayContent content = new ByteArrayContent("application/json", bytes);
+        if (e.getStatusCode() == 503 || e.getStatusCode() == 429) {
+          log.warn("Could not write {}: {}", timestamp_path, e.getMessage());
+          scheduleWriteLastModified(daoTypeName);
+          return;
+        }
+        if (e.getStatusCode() == 404 || e.getStatusCode() == 400) {
+          byte[] bytes = "{}".getBytes();
+          ByteArrayContent content = new ByteArrayContent("application/json", bytes);
 
-              try {
-                log.info("Attempting to add {}", value("path", timestamp_path));
-                timeExecute(insertTimer, obj_api.insert(bucketName, object, content));
-              } catch (IOException ioex) {
-                  log.error("writeLastModified failed to update {}\n{}",
-                            value("path", timestamp_path), e.toString());
-                  log.error("writeLastModified insert failed too", ioex);
-                throw new IllegalStateException(e);
-              }
-          } else {
-              log.error("writeLastModified failed to update {}\n{}",
-                        value("path", timestamp_path), value("exception", e.toString()));
-              throw new IllegalStateException(e);
+          try {
+            log.info("Attempting to add {}", value("path", timestamp_path));
+            timeExecute(insertTimer, obj_api.insert(bucketName, object, content));
+          } catch (IOException ioex) {
+            log.error("writeLastModified failed to update {}\n{}",
+              value("path", timestamp_path), e.toString());
+            log.error("writeLastModified insert failed too", ioex);
+            throw new IllegalStateException(e);
           }
-      } catch (IOException e) {
-          log.error("writeLastModified failed: {}", e);
+        } else {
+          log.error("writeLastModified failed to update {}\n{}",
+            value("path", timestamp_path), value("exception", e.toString()));
           throw new IllegalStateException(e);
+        }
+      } catch (IOException e) {
+        log.error("writeLastModified failed:", e.getMessage());
+        throw new IllegalStateException(e);
       }
 
-      try {
-          // If the bucket is versioned, purge the old timestamp versions
-          // because they serve no value and just consume storage and extra time
-          // if we eventually destroy this bucket.
-          purgeOldVersions(timestamp_path);
-      } catch (Exception e) {
-          log.warn("Failed to purge old versions of {}. Ignoring error.",
-                   value("path", timestamp_path));
+      synchronized (purgeOldVersionPaths) {
+        // If the bucket is versioned, purge the old timestamp versions
+        // because they serve no value and just consume storage and extra time
+        // if we eventually destroy this bucket.
+        // These are queued to reduce rate limiting contention on the file since
+        // it is a long term concern rather than a short term one.
+        purgeOldVersionPaths.add(timestamp_path);
       }
+    }
+  }
+
+  public void purgeBatchedVersionPaths() {
+    String[] paths;
+    synchronized(purgeOldVersionPaths) {
+      if (purgeOldVersionPaths.isEmpty()) {
+        return;
+      }
+      paths = purgeOldVersionPaths.toArray(new String[purgeOldVersionPaths.size()]);
+      purgeOldVersionPaths.clear();
+    }
+    for (String path: paths) {
+      try {
+        purgeOldVersions(path);
+      } catch (Exception e) {
+        synchronized(purgeOldVersionPaths) {
+          purgeOldVersionPaths.add(path);  // try again next time.
+        }
+        log.warn("Failed to purge old versions of {}. Ignoring error.",
+                 value("path", path));
+      }
+    }
   }
 
   // Remove the old versions of a path.
@@ -559,7 +648,11 @@ public class GcsStorageService implements StorageService {
 
   @Override
   public long getLastModified(ObjectType objectType) {
-      String path = daoRoot(objectType.group) + '/' + LAST_MODIFIED_FILENAME;
+      return getLastModifiedOfTypeName(objectType.group);
+  }
+
+  private long getLastModifiedOfTypeName(String daoTypeName) {
+      String path = daoRoot(daoTypeName) + '/' + LAST_MODIFIED_FILENAME;
       try {
         long[] updatedTimestampHolder = new long[1];
         Closure timeExecuteClosure = new Closure<String>(this, this) {
@@ -568,7 +661,7 @@ public class GcsStorageService implements StorageService {
             return Closure.DONE;
           }
         };
-        doRetry(timeExecuteClosure, "get last modified", objectType.group);
+        doRetry(timeExecuteClosure, "get last modified", daoTypeName);
 
         return updatedTimestampHolder[0];
       } catch (Exception e) {
@@ -577,13 +670,13 @@ public class GcsStorageService implements StorageService {
           long now = System.currentTimeMillis();
           if (hre.getStatusCode() == 404) {
               log.info("No timestamp file at {}. Creating a new one.", value("path", path));
-              writeLastModified(objectType.group);
+              writeLastModified(daoTypeName);
               return now;
           }
-          log.error("Error writing timestamp file {}", e);
+          log.error("Error writing timestamp file:", e);
           return now;
         } else {
-          log.error("Error accessing timestamp file {}", e);
+          log.error("Error accessing timestamp file:", e);
           return System.currentTimeMillis();
         }
       }
