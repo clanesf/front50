@@ -20,7 +20,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 
 import java.util.concurrent.TimeUnit;
 
-@ConfigurationProperties("storageService")
+@ConfigurationProperties("storage-service")
 class StorageServiceConfigurationProperties {
   PerObjectType application = new PerObjectType(20, TimeUnit.MINUTES.toMillis(1))
   PerObjectType applicationPermission = new PerObjectType(20, TimeUnit.MINUTES.toMillis(1))
@@ -31,7 +31,7 @@ class StorageServiceConfigurationProperties {
   PerObjectType pipeline = new PerObjectType(20, TimeUnit.MINUTES.toMillis(1))
   PerObjectType pipelineTemplate = new PerObjectType(20, TimeUnit.MINUTES.toMillis(1))
   PerObjectType snapshot = new PerObjectType(2, TimeUnit.MINUTES.toMillis(1))
-  PerObjectType intent = new PerObjectType(20, TimeUnit.MINUTES.toMillis(1))
+  PerObjectType deliveryConfig = new PerObjectType(20, TimeUnit.MINUTES.toMillis(1))
 
   // not commonly used outside of Netflix
   PerObjectType entityTags = new PerObjectType(2, TimeUnit.MINUTES.toMillis(5), false)

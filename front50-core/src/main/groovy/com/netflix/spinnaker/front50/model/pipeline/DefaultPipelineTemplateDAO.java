@@ -20,22 +20,30 @@ import com.netflix.spinnaker.front50.model.ObjectKeyLoader;
 import com.netflix.spinnaker.front50.model.ObjectType;
 import com.netflix.spinnaker.front50.model.StorageService;
 import com.netflix.spinnaker.front50.model.StorageServiceSupport;
-import org.springframework.util.Assert;
-import rx.Scheduler;
-
 import java.util.Collection;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.springframework.util.Assert;
+import rx.Scheduler;
 
-public class DefaultPipelineTemplateDAO extends StorageServiceSupport<PipelineTemplate> implements PipelineTemplateDAO {
+public class DefaultPipelineTemplateDAO extends StorageServiceSupport<PipelineTemplate>
+    implements PipelineTemplateDAO {
 
-  public DefaultPipelineTemplateDAO(StorageService service,
-                                    Scheduler scheduler,
-                                    ObjectKeyLoader objectKeyLoader,
-                                    long refreshIntervalMs,
-                                    boolean shouldWarmCache,
-                                    Registry registry) {
-    super(ObjectType.PIPELINE_TEMPLATE, service, scheduler, objectKeyLoader, refreshIntervalMs, shouldWarmCache, registry);
+  public DefaultPipelineTemplateDAO(
+      StorageService service,
+      Scheduler scheduler,
+      ObjectKeyLoader objectKeyLoader,
+      long refreshIntervalMs,
+      boolean shouldWarmCache,
+      Registry registry) {
+    super(
+        ObjectType.PIPELINE_TEMPLATE,
+        service,
+        scheduler,
+        objectKeyLoader,
+        refreshIntervalMs,
+        shouldWarmCache,
+        registry);
   }
 
   @Override
@@ -43,10 +51,7 @@ public class DefaultPipelineTemplateDAO extends StorageServiceSupport<PipelineTe
     if (scope == null || scope.isEmpty()) {
       return all();
     }
-    return all()
-      .stream()
-      .filter(pt -> pt.containsAnyScope(scope))
-      .collect(Collectors.toList());
+    return all().stream().filter(pt -> pt.containsAnyScope(scope)).collect(Collectors.toList());
   }
 
   @Override

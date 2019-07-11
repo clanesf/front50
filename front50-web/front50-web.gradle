@@ -14,48 +14,48 @@
  * limitations under the License.
  */
 
+apply plugin: 'spinnaker.application'
+
 ext {
-  springConfigLocation = System.getProperty('spring.config.location', "${System.getProperty('user.home')}/.spinnaker/")
-  repackage = System.getProperty('springBoot.repackage', "false")
+  springConfigLocation = System.getProperty('spring.config.additional-location', "${System.getProperty('user.home')}/.spinnaker/")
 }
 
-tasks.withType(org.springframework.boot.gradle.run.BootRunTask) {
-  systemProperty('spring.config.location', project.springConfigLocation)
+run {
+  systemProperty('spring.config.additional-location', project.springConfigLocation)
 }
-
-apply plugin: 'org.springframework.boot'
-apply plugin: 'spinnaker.package'
+mainClassName = 'com.netflix.spinnaker.front50.Main'
 
 configurations.all {
   exclude group: 'org.slf4j', module: 'slf4j-log4j12'
 }
 
 dependencies {
-  compile project(":front50-core")
-  compile project(":front50-cassandra")
-  compile project(":front50-gcs")
-  compile project(":front50-redis")
-  compile project(":front50-s3")
-  compile project(":front50-swift")
-  compile project(":front50-pipelines")
-  compile project(":front50-migrations")
-  compile project(":front50-azure")
-  compile project(":front50-oracle")
+  implementation project(":front50-core")
+  implementation project(":front50-migrations")
+  implementation "org.springframework.boot:spring-boot-starter-web"
+  implementation "org.springframework.boot:spring-boot-starter-actuator"
+  implementation "com.netflix.spinnaker.fiat:fiat-api:$fiatVersion"
+  implementation "com.netflix.spinnaker.fiat:fiat-core:$fiatVersion"
+  implementation "com.netflix.spinnaker.kork:kork-web"
+  implementation "com.netflix.spinnaker.kork:kork-stackdriver"
+  implementation "com.netflix.spinnaker.kork:kork-exceptions"
+  implementation "com.netflix.spinnaker.kork:kork-hystrix"
+  implementation "com.netflix.spinnaker.kork:kork-swagger"
+  implementation "com.netflix.spinnaker.kork:kork-core"
+  implementation "com.squareup.retrofit:converter-jackson"
+  runtimeOnly "com.netflix.spinnaker.kork:kork-secrets-aws"
 
-  spinnaker.group "bootWeb"
+  testImplementation project(":front50-test")
+  testImplementation project(":front50-s3")
+  testImplementation "com.amazonaws:aws-java-sdk-s3"
 
-  compile spinnaker.dependency("korkWeb")
-  compile spinnaker.dependency("korkStackdriver")
-  compile spinnaker.dependency("korkSwagger")
-  compile spinnaker.dependency("kork")
-
-  testCompile project(":front50-test")
+  // Add each included cloud provider project as a runtime dependency
+  gradle.includedProviderProjects.each {
+    runtimeOnly project(it)
+  }
 }
 
-bootRun {
-  // jamm is required when using prepared statements with in-memory C*
-  def jamm = project.configurations.compile.find { it.name.startsWith('jamm') }
-  jvmArgs applicationDefaultJvmArgs + "-javaagent:${jamm}"
+test {
+  environment "AWS_ACCESS_KEY_ID", "null"
+  environment "AWS_SECRET_KEY", "null"
 }
-
-tasks.bootRepackage.enabled = Boolean.valueOf(project.repackage)

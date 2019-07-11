@@ -23,7 +23,7 @@ import com.netflix.spinnaker.filters.AuthenticatedRequestFilter
 import com.netflix.spinnaker.front50.exceptions.AccessDeniedExceptionHandler
 import com.netflix.spinnaker.front50.model.application.ApplicationDAO
 import com.netflix.spinnaker.front50.model.application.ApplicationPermissionDAO
-import com.netflix.spinnaker.front50.model.intent.IntentDAO
+import com.netflix.spinnaker.front50.model.delivery.DeliveryRepository
 import com.netflix.spinnaker.front50.model.pipeline.PipelineDAO
 import com.netflix.spinnaker.front50.model.pipeline.PipelineStrategyDAO
 import com.netflix.spinnaker.front50.model.pipeline.PipelineTemplateDAO
@@ -36,13 +36,12 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.web.servlet.FilterRegistrationBean
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.ComponentScan
-import org.springframework.context.annotation.Conditional
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.Ordered
 import org.springframework.http.HttpStatus
 import org.springframework.scheduling.TaskScheduler
 import org.springframework.scheduling.annotation.EnableScheduling
-import org.springframework.scheduling.concurrent.ConcurrentTaskScheduler
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler
 import org.springframework.web.bind.annotation.ControllerAdvice
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.ResponseBody
@@ -63,9 +62,11 @@ public class Front50WebConfig extends WebMvcConfigurerAdapter {
 
   @Bean
   TaskScheduler taskScheduler() {
-    //this is what implicitly gets created by @EnableScheduling but now exported
-    // as a bean for use elsewhere
-    new ConcurrentTaskScheduler(Executors.newSingleThreadScheduledExecutor())
+    ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler()
+    scheduler.setThreadNamePrefix("scheduler-")
+    scheduler.setPoolSize(10)
+
+    return scheduler
   }
 
   @Override
@@ -123,9 +124,9 @@ public class Front50WebConfig extends WebMvcConfigurerAdapter {
   }
 
   @Bean
-  @ConditionalOnBean(IntentDAO)
-  ItemDAOHealthIndicator intentDAOHealthIndicator(IntentDAO intentDAO, TaskScheduler taskScheduler) {
-    return new ItemDAOHealthIndicator(intentDAO, taskScheduler)
+  @ConditionalOnBean(DeliveryRepository)
+  ItemDAOHealthIndicator deliveryRepositoryHealthIndicator(DeliveryRepository deliveryRepository, TaskScheduler taskScheduler) {
+    return new ItemDAOHealthIndicator(deliveryRepository, taskScheduler)
   }
 
   @Bean
